@@ -1,0 +1,1417 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NutriPlay - Aprende Nutrición</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <!-- Babel para JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        nutrigreen: {
+                            100: '#E6F4EA',
+                            200: '#C8E6C9',
+                            300: '#A5D6A7',
+                            400: '#81C784',
+                            500: '#4CAF50',
+                            600: '#43A047',
+                            700: '#388E3C',
+                            800: '#2E7D32',
+                            900: '#1B5E20',
+                        },
+                        nutriwhite: '#FFFFFF',
+                        nutriblack: '#1F2937',
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif', 'system-ui'],
+                        rounded: ['Nunito', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Nunito:wght@600;700;800&display=swap');
+        
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f3f4f6;
+            color: #1F2937;
+        }
+
+        .font-rounded {
+            font-family: 'Nunito', sans-serif;
+        }
+
+        /* Ocultar scrollbar pero permitir scroll */
+        .no-scrollbar::-webkit-scrollbar {
+            display: none;
+        }
+        .no-scrollbar {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+
+        /* Animaciones para el mapa */
+        .level-node {
+            transition: all 0.3s ease;
+        }
+        .level-node:hover:not(:disabled) {
+            transform: scale(1.1);
+        }
+        
+        /* Estilo Duolingo-esque para botones */
+        .btn-bouncy {
+            transition: transform 0.1s;
+            border-bottom-width: 4px;
+        }
+        .btn-bouncy:active:not(:disabled) {
+            transform: translateY(4px);
+            border-bottom-width: 0px;
+            margin-top: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef } = React;
+
+        // --- CONFIGURACIÓN Y UTILIDADES API GEMINI ---
+        const apiKey = ""; // Se proporcionará dinámicamente en el entorno de ejecución
+
+        // Utilidad para llamadas de red con "exponential backoff" (reintentos)
+        async function fetchWithRetry(url, options, maxRetries = 5) {
+            const delays = [1000, 2000, 4000, 8000, 16000];
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    const response = await fetch(url, options);
+                    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                    return await response.json();
+                } catch (error) {
+                    if (i === maxRetries - 1) throw error;
+                    await new Promise(r => setTimeout(r, delays[i]));
+                }
+            }
+        }
+
+        // Utilidad para generación de texto (NutriIA y NutriCoach)
+        async function generateText(prompt, systemInstruction) {
+            if (!apiKey) throw new Error("API Key no configurada.");
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+            const payload = {
+                contents: [{ parts: [{ text: prompt }] }],
+                systemInstruction: systemInstruction ? { parts: [{ text: systemInstruction }] } : undefined
+            };
+            const result = await fetchWithRetry(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            return result.candidates?.[0]?.content?.parts?.[0]?.text;
+        }
+
+        // Utilidad para visión artificial estructurada en JSON (NutriScan)
+        async function analyzeImage(base64Image, prompt) {
+            if (!apiKey) throw new Error("API Key no configurada.");
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+            const payload = {
+                contents: [{
+                    role: "user",
+                    parts: [
+                        { text: prompt },
+                        { inlineData: { mimeType: "image/jpeg", data: base64Image.split(',')[1] } }
+                    ]
+                }],
+                generationConfig: { 
+                    responseMimeType: "application/json",
+                    responseSchema: {
+                        type: "OBJECT",
+                        properties: {
+                            name: { type: "STRING" },
+                            cals: { type: "INTEGER" },
+                            nutrients: { type: "STRING" },
+                            warning: { type: "STRING" }
+                        }
+                    }
+                }
+            };
+            const result = await fetchWithRetry(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+            return JSON.parse(text);
+        }
+
+        // --- BASE DE DATOS MOCK ---
+        const foodDatabase = [
+            { id: 1, name: "Manzana", category: "Frutas", protein: 0.3, carbs: 14, fat: 0.2, cals: 52, vitamins: ["Vitamina C", "Vitamina A"], minerals: ["Potasio"], benefits: "Buena para la digestión y el corazón.", freq: "1-2 al día" },
+            { id: 2, name: "Plátano", category: "Frutas", protein: 1.1, carbs: 22.8, fat: 0.3, cals: 89, vitamins: ["Vitamina B6", "Vitamina C"], minerals: ["Potasio", "Magnesio"], benefits: "Excelente fuente de energía rápida y ayuda muscular.", freq: "1 al día" },
+            { id: 3, name: "Brócoli", category: "Verduras", protein: 2.8, carbs: 7, fat: 0.4, cals: 34, vitamins: ["Vitamina C", "Vitamina K", "Vitamina A"], minerals: ["Hierro", "Calcio"], benefits: "Poderoso antioxidante, bueno para huesos.", freq: "3-4 veces por semana" },
+            { id: 4, name: "Pollo (pechuga)", category: "Proteínas", protein: 31, carbs: 0, fat: 3.6, cals: 165, vitamins: ["Vitamina B6", "Vitamina B12"], minerals: ["Fósforo", "Selenio"], benefits: "Construcción y reparación muscular.", freq: "3-4 veces por semana" },
+            { id: 5, name: "Lentejas", category: "Legumbres", protein: 9, carbs: 20, fat: 0.4, cals: 116, vitamins: ["Vitamina B9 (Ácido fólico)"], minerals: ["Hierro", "Potasio"], benefits: "Alta en fibra y proteína vegetal, previene anemia.", freq: "2-3 veces por semana" },
+            { id: 6, name: "Avena", category: "Cereales", protein: 16.9, carbs: 66.3, fat: 6.9, cals: 389, vitamins: ["Vitamina B1", "Vitamina B5"], minerals: ["Manganeso", "Fósforo", "Magnesio"], benefits: "Reduce el colesterol y da saciedad prolongada.", freq: "Diario" },
+            { id: 7, name: "Salmón", category: "Proteínas", protein: 20, carbs: 0, fat: 13, cals: 208, vitamins: ["Vitamina B12", "Vitamina D"], minerals: ["Selenio", "Potasio"], benefits: "Rico en Omega-3, excelente para el cerebro y corazón.", freq: "2 veces por semana" },
+            { id: 8, name: "Espinaca", category: "Verduras", protein: 2.9, carbs: 3.6, fat: 0.4, cals: 23, vitamins: ["Vitamina A", "Vitamina C", "Vitamina K"], minerals: ["Hierro", "Calcio"], benefits: "Fortalece la vista y mejora la oxigenación.", freq: "Frecuente" },
+            { id: 9, name: "Huevo", category: "Proteínas", protein: 13, carbs: 1.1, fat: 11, cals: 155, vitamins: ["Vitamina D", "Vitamina B12", "Vitamina A"], minerals: ["Hierro", "Fósforo"], benefits: "Proteína de alto valor biológico.", freq: "1-2 al día" },
+            { id: 10, name: "Arroz integral", category: "Cereales", protein: 2.6, carbs: 23, fat: 0.9, cals: 111, vitamins: ["Vitamina B1", "Vitamina B3"], minerals: ["Manganeso", "Magnesio"], benefits: "Aporta energía sostenida y fibra.", freq: "Frecuente" }
+        ];
+
+        const levelsData = [
+            {
+                id: 1, title: "Los Fundamentos", desc: "Descubre por qué necesitamos comer bien.",
+                content: "Tu cuerpo es como un coche de carreras. Si le pones mal combustible (comida chatarra), no correrá rápido y se dañará. Los nutrientes son el combustible de alta calidad.",
+                questions: [
+                    { q: "¿Qué pasa si solo comes comida chatarra?", options: ["Tengo más energía", "Me canso rápido y me enfermo", "Me vuelvo invisible"], answer: 1, explanation: "La comida ultraprocesada carece de nutrientes esenciales, lo que causa cansancio y enfermedades a largo plazo." }
+                ],
+                scenario: { context: "Acabas de jugar un partido de fútbol muy intenso y tienes sed.", question: "¿Qué bebida eliges?", options: ["Una gaseosa gigante", "Agua o una bebida rehidratante natural", "Un jugo en caja muy dulce"], answer: 1, explanation: "El agua hidrata tus células directamente. Las gaseosas tienen tanta azúcar que te darán más sed y no reponen minerales." }
+            },
+            {
+                id: 2, title: "El Escuadrón Constructor", desc: "Conoce a las Proteínas.",
+                content: "Las proteínas son los ladrillos de tu cuerpo. Construyen tus músculos, piel y cabello. Sin ellas, te debilitarías.",
+                questions: [
+                    { q: "¿Cuál de estos alimentos es rico en proteínas?", options: ["Una manzana", "Una pechuga de pollo", "Un paquete de galletas"], answer: 1, explanation: "El pollo, pescado, huevos y menestras son excelentes fuentes de proteína." }
+                ],
+                scenario: { context: "Estás armando tu lonchera para el colegio.", question: "¿Qué incluyes para mantenerte fuerte?", options: ["Solo unas papas fritas de bolsa", "Un sándwich de pollo con lechuga", "Un chocolate grande"], answer: 1, explanation: "El sándwich aporta proteínas (pollo) y fibra (lechuga), dándote saciedad y energía real." }
+            },
+            {
+                id: 3, title: "Energía Pura", desc: "Los Carbohidratos Buenos vs Malos.",
+                content: "Los carbohidratos te dan energía. Pero hay dos tipos: los rápidos (azúcares) que te dan un bajón pronto, y los lentos (avena, arroz integral) que te mantienen activo todo el día.",
+                questions: [
+                    { q: "¿Cuál te dará energía duradera para estudiar?", options: ["Un plato de avena", "Un caramelo", "Una dona"], answer: 0, explanation: "La avena es un carbohidrato complejo. Libera energía poco a poco, ayudando a tu concentración." }
+                ],
+                scenario: { context: "Estás en el supermercado para comprar cereal de desayuno.", question: "¿Cuál eliges?", options: ["El que tiene más colores y azúcar", "Avena integral o cereal sin azúcar añadida", "No desayuno"], answer: 1, explanation: "Leer las etiquetas es clave. Evita los productos con azúcar como primer ingrediente." }
+            }
+        ];
+
+        // --- COMPONENTES UI (Simulando Lucide/Heroicons) ---
+        const Icon = ({ name, className = "w-6 h-6", ...props }) => {
+            const icons = {
+                apple: <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}><path d="M12 20a8 8 0 1 0 0-16 8 8 0 0 0 0 16Z"/><path d="M12 4a2 2 0 0 0-2-2 2 2 0 0 0-2 2"/></svg>,
+                user: <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>,
+                lock: <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>,
+                home: <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>,
+                map: <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}><polygon points="3 6 9 3 15 6 21 3 21 18 15 21 9 18 3 21"/><line x1="9" x2="9" y1="3" y2="18"/><line x1="15" x2="15" y1="6" y2="21"/></svg>,
+                bot: <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}><rect width="18" height="14" x="3" y="7" rx="2"/><path d="M12 7V3"/><path d="M9 3h6"/><path d="M9 11v4"/><path d="M15 11v4"/></svg>,
+                search: <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>,
+                book: <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/></svg>,
+                chart: <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>,
+                camera: <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>,
+                star: <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>,
+                flame: <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></svg>,
+                check: <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}><polyline points="20 6 9 17 4 12"/></svg>,
+                x: <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>,
+                chevronRight: <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}><path d="m9 18 6-6-6-6"/></svg>,
+                trophy: <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/></svg>
+            };
+            return icons[name] || null;
+        };
+
+        const Button = ({ children, onClick, type = "primary", className = "", disabled = false }) => {
+            const baseStyle = "w-full py-3 px-4 rounded-2xl font-bold font-rounded text-lg text-center flex items-center justify-center gap-2 btn-bouncy";
+            const styles = {
+                primary: "bg-nutrigreen-500 text-white border-nutrigreen-700 hover:bg-nutrigreen-400",
+                secondary: "bg-white text-nutriblack border-gray-300 hover:bg-gray-50",
+                danger: "bg-red-500 text-white border-red-700 hover:bg-red-400",
+                disabled: "bg-gray-300 text-gray-500 border-gray-400 cursor-not-allowed opacity-70"
+            };
+            
+            return (
+                <button 
+                    onClick={onClick} 
+                    disabled={disabled}
+                    className={`${baseStyle} ${disabled ? styles.disabled : styles[type]} ${className}`}
+                >
+                    {children}
+                </button>
+            );
+        };
+
+        const NutriMascot = ({ mood = "happy", message, size = "md" }) => {
+            const sizes = { sm: "w-16", md: "w-24", lg: "w-32" };
+            const moods = {
+                happy: "https://api.dicebear.com/7.x/shapes/svg?seed=Nutri&backgroundColor=b6e3f4,c0aede,d1d4f9&shape1Color=4CAF50&shape2Color=81C784", // Simulación simple con colores verdes
+                sad: "https://api.dicebear.com/7.x/shapes/svg?seed=NutriSad&backgroundColor=f4b6b6&shape1Color=4CAF50",
+                thinking: "https://api.dicebear.com/7.x/shapes/svg?seed=NutriThink&backgroundColor=f4e1b6&shape1Color=4CAF50"
+            };
+
+            return (
+                <div className="flex flex-col items-center">
+                    <div className={`relative ${sizes[size]}`}>
+                        <div className="bg-nutrigreen-500 rounded-full w-full aspect-square flex items-center justify-center relative shadow-lg">
+                            {/* Cuerpo Manzana */}
+                            <div className="absolute -top-3 w-4 h-8 bg-amber-800 rounded-full origin-bottom rotate-12"></div>
+                            <div className="absolute -top-2 right-1/4 w-8 h-4 bg-green-700 rounded-full origin-left -rotate-12 rounded-tl-full"></div>
+                            
+                            {/* Cara */}
+                            {mood === 'happy' && (
+                                <div className="absolute inset-0 flex flex-col items-center justify-center">
+                                    <div className="flex gap-4 mb-2">
+                                        <div className="w-4 h-5 bg-nutriblack rounded-full">
+                                            <div className="w-2 h-2 bg-white rounded-full mt-1 ml-1"></div>
+                                        </div>
+                                        <div className="w-4 h-5 bg-nutriblack rounded-full">
+                                            <div className="w-2 h-2 bg-white rounded-full mt-1 ml-1"></div>
+                                        </div>
+                                    </div>
+                                    <div className="w-8 h-4 bg-nutriblack rounded-b-full"></div>
+                                </div>
+                            )}
+                            {mood === 'sad' && (
+                                <div className="absolute inset-0 flex flex-col items-center justify-center">
+                                    <div className="flex gap-4 mb-4">
+                                        <div className="w-4 h-4 bg-nutriblack rounded-t-full"></div>
+                                        <div className="w-4 h-4 bg-nutriblack rounded-t-full"></div>
+                                    </div>
+                                    <div className="w-6 h-2 bg-nutriblack rounded-t-full"></div>
+                                </div>
+                            )}
+                             {mood === 'thinking' && (
+                                <div className="absolute inset-0 flex flex-col items-center justify-center">
+                                    <div className="flex gap-4 mb-2">
+                                        <div className="w-4 h-4 bg-nutriblack rounded-full"></div>
+                                        <div className="w-4 h-2 bg-nutriblack rounded-full mt-1"></div>
+                                    </div>
+                                    <div className="w-4 h-4 border-b-2 border-r-2 border-nutriblack rounded-br-full ml-4"></div>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                    {message && (
+                        <div className="mt-4 bg-white p-4 rounded-2xl shadow-md border-2 border-nutrigreen-200 relative text-center max-w-sm">
+                            <div className="absolute -top-2 left-1/2 -translate-x-1/2 w-4 h-4 bg-white border-t-2 border-l-2 border-nutrigreen-200 rotate-45"></div>
+                            <p className="font-medium text-nutriblack">{message}</p>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        // --- PANTALLAS DE AUTH ---
+        const LoginScreen = ({ onLogin, onNavigate }) => {
+            const [username, setUsername] = useState('');
+            const [password, setPassword] = useState('');
+            const [error, setError] = useState('');
+
+            const handleLogin = () => {
+                const users = JSON.parse(localStorage.getItem('nutriUsers') || '{}');
+                if (users[username] && users[username].password === password) {
+                    onLogin(users[username]);
+                } else {
+                    setError('Usuario o contraseña incorrectos');
+                }
+            };
+
+            return (
+                <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-nutrigreen-50">
+                    <div className="w-full max-w-md bg-white p-8 rounded-3xl shadow-xl border-2 border-nutrigreen-100">
+                        <div className="flex justify-center mb-6">
+                            <NutriMascot mood="happy" size="lg" message="¡Hola! Soy Nutri, bienvenido a NutriPlay" />
+                        </div>
+                        <h1 className="text-3xl font-bold text-center text-nutrigreen-600 mb-8 font-rounded">Iniciar Sesión</h1>
+                        
+                        {error && <div className="bg-red-100 text-red-600 p-3 rounded-xl mb-4 text-sm text-center">{error}</div>}
+                        
+                        <div className="space-y-4">
+                            <div className="relative">
+                                <Icon name="user" className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
+                                <input 
+                                    type="text" 
+                                    placeholder="Nombre de usuario" 
+                                    className="w-full pl-12 pr-4 py-3 bg-gray-50 border-2 border-gray-200 rounded-2xl focus:border-nutrigreen-500 focus:outline-none transition-colors"
+                                    value={username} onChange={e => setUsername(e.target.value)}
+                                />
+                            </div>
+                            <div className="relative">
+                                <Icon name="lock" className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
+                                <input 
+                                    type="password" 
+                                    placeholder="Contraseña" 
+                                    className="w-full pl-12 pr-4 py-3 bg-gray-50 border-2 border-gray-200 rounded-2xl focus:border-nutrigreen-500 focus:outline-none transition-colors"
+                                    value={password} onChange={e => setPassword(e.target.value)}
+                                />
+                            </div>
+                            
+                            <Button onClick={handleLogin} className="mt-6">¡Entrar!</Button>
+                            
+                            <div className="text-center mt-4 text-sm">
+                                <button onClick={() => onNavigate('recover')} className="text-nutrigreen-600 font-semibold hover:underline">¿Olvidaste tu contraseña?</button>
+                            </div>
+                            
+                            <div className="border-t-2 border-gray-100 mt-6 pt-6">
+                                <Button onClick={() => onNavigate('register')} type="secondary">Crear una cuenta nueva</Button>
+                            </div>
+                        </div>
+                    </div>
+                    <div className="mt-8 text-center text-gray-500 text-sm">
+                        Desarrollado por Alfonso Báez
+                    </div>
+                </div>
+            );
+        };
+
+        const RegisterScreen = ({ onNavigate, onLogin }) => {
+            const [formData, setFormData] = useState({ username: '', password: '', confirm: '', securityQ: '', securityA: '' });
+            const [error, setError] = useState('');
+
+            const handleRegister = () => {
+                if (!formData.username || !formData.password || !formData.securityQ || !formData.securityA) {
+                    setError('Todos los campos son obligatorios'); return;
+                }
+                if (formData.password !== formData.confirm) {
+                    setError('Las contraseñas no coinciden'); return;
+                }
+
+                const users = JSON.parse(localStorage.getItem('nutriUsers') || '{}');
+                if (users[formData.username]) {
+                    setError('El usuario ya existe'); return;
+                }
+
+                const newUser = {
+                    username: formData.username,
+                    password: formData.password,
+                    securityQ: formData.securityQ,
+                    securityA: formData.securityA.toLowerCase(),
+                    profile: { xp: 0, level: 1, streak: 0, lastLogin: new Date().toISOString(), highestLevelUnlocked: 1, badges: [] },
+                    diary: {},
+                    history: []
+                };
+
+                users[formData.username] = newUser;
+                localStorage.setItem('nutriUsers', JSON.stringify(users));
+                onLogin(newUser);
+            };
+
+            return (
+                <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-nutrigreen-50">
+                    <div className="w-full max-w-md bg-white p-8 rounded-3xl shadow-xl border-2 border-nutrigreen-100">
+                        <h1 className="text-3xl font-bold text-center text-nutrigreen-600 mb-6 font-rounded">Únete a NutriPlay</h1>
+                        
+                        {error && <div className="bg-red-100 text-red-600 p-3 rounded-xl mb-4 text-sm text-center">{error}</div>}
+                        
+                        <div className="space-y-4">
+                            <input type="text" placeholder="Elige un nombre de usuario" className="w-full px-4 py-3 bg-gray-50 border-2 border-gray-200 rounded-2xl focus:border-nutrigreen-500"
+                                value={formData.username} onChange={e => setFormData({...formData, username: e.target.value})} />
+                            
+                            <input type="password" placeholder="Crea una contraseña" className="w-full px-4 py-3 bg-gray-50 border-2 border-gray-200 rounded-2xl focus:border-nutrigreen-500"
+                                value={formData.password} onChange={e => setFormData({...formData, password: e.target.value})} />
+                            
+                            <input type="password" placeholder="Repite la contraseña" className="w-full px-4 py-3 bg-gray-50 border-2 border-gray-200 rounded-2xl focus:border-nutrigreen-500"
+                                value={formData.confirm} onChange={e => setFormData({...formData, confirm: e.target.value})} />
+
+                            <div className="pt-4 border-t-2 border-gray-100">
+                                <p className="text-sm text-gray-500 mb-2 font-medium">Pregunta de seguridad (Para recuperar cuenta)</p>
+                                <select className="w-full px-4 py-3 bg-gray-50 border-2 border-gray-200 rounded-2xl focus:border-nutrigreen-500 mb-2"
+                                    value={formData.securityQ} onChange={e => setFormData({...formData, securityQ: e.target.value})}>
+                                    <option value="">Selecciona una pregunta...</option>
+                                    <option value="pet">¿Cuál fue el nombre de tu primera mascota?</option>
+                                    <option value="hero">¿Quién es tu héroe de la infancia?</option>
+                                    <option value="food">¿Cuál es tu comida favorita?</option>
+                                </select>
+                                <input type="text" placeholder="Tu respuesta secreta" className="w-full px-4 py-3 bg-gray-50 border-2 border-gray-200 rounded-2xl focus:border-nutrigreen-500"
+                                    value={formData.securityA} onChange={e => setFormData({...formData, securityA: e.target.value})} />
+                            </div>
+
+                            <Button onClick={handleRegister} className="mt-4">Registrarme</Button>
+                            <Button onClick={() => onNavigate('login')} type="secondary">Volver al inicio</Button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const RecoverScreen = ({ onNavigate }) => {
+            const [step, setStep] = useState(1);
+            const [username, setUsername] = useState('');
+            const [userQ, setUserQ] = useState('');
+            const [answer, setAnswer] = useState('');
+            const [newPassword, setNewPassword] = useState('');
+            const [msg, setMsg] = useState('');
+
+            const handleCheckUser = () => {
+                const users = JSON.parse(localStorage.getItem('nutriUsers') || '{}');
+                if (users[username]) {
+                    setUserQ(users[username].securityQ);
+                    setStep(2);
+                    setMsg('');
+                } else {
+                    setMsg('Usuario no encontrado');
+                }
+            };
+
+            const handleVerify = () => {
+                const users = JSON.parse(localStorage.getItem('nutriUsers') || '{}');
+                if (users[username].securityA === answer.toLowerCase()) {
+                    setStep(3);
+                    setMsg('');
+                } else {
+                    setMsg('Respuesta incorrecta');
+                }
+            };
+
+            const handleReset = () => {
+                const users = JSON.parse(localStorage.getItem('nutriUsers') || '{}');
+                users[username].password = newPassword;
+                localStorage.setItem('nutriUsers', JSON.stringify(users));
+                setMsg('¡Contraseña actualizada!');
+                setTimeout(() => onNavigate('login'), 2000);
+            };
+
+            const questionsMap = {
+                pet: "¿Cuál fue el nombre de tu primera mascota?",
+                hero: "¿Quién es tu héroe de la infancia?",
+                food: "¿Cuál es tu comida favorita?"
+            };
+
+            return (
+                 <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-nutrigreen-50">
+                    <div className="w-full max-w-md bg-white p-8 rounded-3xl shadow-xl border-2 border-nutrigreen-100">
+                        <h1 className="text-2xl font-bold text-center text-nutrigreen-600 mb-6 font-rounded">Recuperar Cuenta</h1>
+                        {msg && <div className={`p-3 rounded-xl mb-4 text-sm text-center ${msg.includes('!') ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'}`}>{msg}</div>}
+                        
+                        <div className="space-y-4">
+                            {step === 1 && (
+                                <>
+                                    <input type="text" placeholder="Tu nombre de usuario" className="w-full px-4 py-3 bg-gray-50 border-2 border-gray-200 rounded-2xl"
+                                        value={username} onChange={e => setUsername(e.target.value)} />
+                                    <Button onClick={handleCheckUser}>Buscar</Button>
+                                </>
+                            )}
+                            {step === 2 && (
+                                <>
+                                    <p className="font-medium text-gray-700">{questionsMap[userQ]}</p>
+                                    <input type="text" placeholder="Tu respuesta secreta" className="w-full px-4 py-3 bg-gray-50 border-2 border-gray-200 rounded-2xl"
+                                        value={answer} onChange={e => setAnswer(e.target.value)} />
+                                    <Button onClick={handleVerify}>Verificar</Button>
+                                </>
+                            )}
+                            {step === 3 && (
+                                <>
+                                    <input type="password" placeholder="Nueva contraseña" className="w-full px-4 py-3 bg-gray-50 border-2 border-gray-200 rounded-2xl"
+                                        value={newPassword} onChange={e => setNewPassword(e.target.value)} />
+                                    <Button onClick={handleReset}>Actualizar Contraseña</Button>
+                                </>
+                            )}
+                            <Button onClick={() => onNavigate('login')} type="secondary">Cancelar</Button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- DASHBOARD Y NAVEGACION ---
+        const Dashboard = ({ user, changeView }) => {
+            const progress = (user.profile.xp % 100);
+            const nextLevelXP = 100;
+
+            return (
+                <div className="p-6 pb-24 max-w-4xl mx-auto space-y-6">
+                    {/* Header Perfil */}
+                    <div className="bg-white rounded-3xl p-6 shadow-sm border-2 border-gray-100 flex items-center justify-between">
+                        <div className="flex items-center gap-4">
+                            <div className="w-16 h-16 bg-nutrigreen-100 rounded-full flex items-center justify-center border-4 border-nutrigreen-300">
+                                <Icon name="user" className="w-8 h-8 text-nutrigreen-600" />
+                            </div>
+                            <div>
+                                <h2 className="text-2xl font-bold font-rounded text-nutriblack">{user.username}</h2>
+                                <div className="flex items-center gap-2 text-orange-500 font-bold">
+                                    <Icon name="flame" className="w-5 h-5" /> {user.profile.streak} Días de racha
+                                </div>
+                            </div>
+                        </div>
+                        <div className="text-center">
+                            <div className="w-12 h-12 bg-amber-100 rounded-full flex items-center justify-center border-4 border-amber-300 mx-auto">
+                                <span className="font-bold text-amber-600">{user.profile.level}</span>
+                            </div>
+                            <span className="text-xs font-bold text-gray-500 mt-1 block">Nivel</span>
+                        </div>
+                    </div>
+
+                    {/* XP Progress */}
+                    <div className="bg-white rounded-3xl p-6 shadow-sm border-2 border-gray-100">
+                        <div className="flex justify-between mb-2">
+                            <span className="font-bold text-gray-700">Progreso al Nivel {user.profile.level + 1}</span>
+                            <span className="font-bold text-nutrigreen-600">{progress} / {nextLevelXP} XP</span>
+                        </div>
+                        <div className="h-4 w-full bg-gray-200 rounded-full overflow-hidden">
+                            <div className="h-full bg-nutrigreen-500 transition-all duration-500" style={{ width: `${(progress/nextLevelXP)*100}%` }}></div>
+                        </div>
+                    </div>
+
+                    {/* Tarjeta de NutriCoach */}
+                    <div className="bg-gradient-to-r from-nutrigreen-400 to-nutrigreen-600 rounded-3xl p-6 shadow-lg text-white flex items-center gap-4">
+                        <NutriMascot mood="happy" size="sm" />
+                        <div>
+                            <h3 className="font-bold font-rounded text-xl mb-1">NutriCoach dice:</h3>
+                            <p className="text-nutrigreen-50 text-sm leading-relaxed">
+                                {user.profile.streak > 0 
+                                    ? `¡Excelente racha de ${user.profile.streak} días! Sigue aprendiendo para mantener tu salud al máximo.` 
+                                    : "¡Empecemos tu viaje nutricional hoy! Ve a los niveles para ganar tu primera XP."}
+                            </p>
+                        </div>
+                    </div>
+
+                    {/* Acciones Rápidas */}
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        {[
+                            { id: 'map', icon: 'map', title: 'Niveles', color: 'bg-blue-100 text-blue-600' },
+                            { id: 'diary', icon: 'book', title: 'Diario', color: 'bg-orange-100 text-orange-600' },
+                            { id: 'search', icon: 'search', title: 'Buscador', color: 'bg-purple-100 text-purple-600' },
+                            { id: 'stats', icon: 'chart', title: 'Estadísticas', color: 'bg-pink-100 text-pink-600' }
+                        ].map(action => (
+                            <button 
+                                key={action.id} 
+                                onClick={() => changeView(action.id)}
+                                className="bg-white p-4 rounded-3xl shadow-sm border-2 border-gray-100 flex flex-col items-center justify-center gap-2 hover:border-nutrigreen-300 transition-colors btn-bouncy"
+                            >
+                                <div className={`w-12 h-12 rounded-full flex items-center justify-center ${action.color}`}>
+                                    <Icon name={action.icon} />
+                                </div>
+                                <span className="font-bold text-sm text-gray-700">{action.title}</span>
+                            </button>
+                        ))}
+                    </div>
+
+                    {/* Insignias / Logros (Mocks) */}
+                    <div className="bg-white rounded-3xl p-6 shadow-sm border-2 border-gray-100">
+                        <h3 className="font-bold font-rounded text-xl mb-4 flex items-center gap-2"><Icon name="trophy" className="text-yellow-500" /> Últimos Logros</h3>
+                        {user.profile.badges && user.profile.badges.length > 0 ? (
+                            <div className="flex gap-4">
+                                {/* Render badges here */}
+                            </div>
+                        ) : (
+                            <p className="text-gray-500 text-center py-4 bg-gray-50 rounded-2xl border-2 border-dashed border-gray-200">
+                                Aún no tienes insignias. ¡Completa niveles para ganar!
+                            </p>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        // --- MAPA DE APRENDIZAJE Y NIVELES ---
+        const LearningMap = ({ user, onSelectLevel }) => {
+            return (
+                <div className="p-6 pb-24 max-w-lg mx-auto min-h-[80vh] flex flex-col items-center justify-center relative">
+                    <h2 className="text-3xl font-bold font-rounded text-nutriblack mb-8 absolute top-6">Tu Ruta Nutricional</h2>
+                    
+                    <div className="relative w-full flex flex-col items-center py-20 gap-16">
+                        {/* Línea conectora (simplificada para diseño vertical) */}
+                        <div className="absolute top-20 bottom-20 w-4 bg-gray-200 rounded-full z-0"></div>
+
+                        {levelsData.map((level, index) => {
+                            const isUnlocked = level.id <= user.profile.highestLevelUnlocked;
+                            const isCompleted = level.id < user.profile.highestLevelUnlocked;
+                            const isCurrent = level.id === user.profile.highestLevelUnlocked;
+                            
+                            // Alternar lados para el diseño del mapa
+                            const xOffset = index % 2 === 0 ? '-translate-x-12' : 'translate-x-12';
+
+                            return (
+                                <div key={level.id} className={`relative z-10 flex flex-col items-center ${xOffset}`}>
+                                    {isCurrent && (
+                                        <div className="absolute -top-12 animate-bounce">
+                                            <div className="bg-white px-3 py-1 rounded-xl text-xs font-bold text-nutrigreen-600 shadow-md border-2 border-nutrigreen-200">
+                                                ¡Empieza aquí!
+                                                <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-2 h-2 bg-white border-b-2 border-r-2 border-nutrigreen-200 rotate-45"></div>
+                                            </div>
+                                        </div>
+                                    )}
+                                    <button 
+                                        onClick={() => onSelectLevel(level)}
+                                        disabled={!isUnlocked}
+                                        className={`w-20 h-20 rounded-full flex items-center justify-center border-b-8 level-node
+                                            ${isCompleted ? 'bg-yellow-400 border-yellow-600 text-white' : 
+                                              isCurrent ? 'bg-nutrigreen-500 border-nutrigreen-700 text-white' : 
+                                              'bg-gray-200 border-gray-300 text-gray-400 cursor-not-allowed'}
+                                        `}
+                                    >
+                                        <Icon name={isCompleted ? "star" : isCurrent ? "star" : "lock"} className="w-10 h-10" />
+                                    </button>
+                                    <span className="font-bold text-gray-700 mt-2 bg-white/80 px-2 py-1 rounded-lg backdrop-blur-sm">{level.title}</span>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+            );
+        };
+
+        const LevelPlay = ({ level, user, onComplete, onExit }) => {
+            const [step, setStep] = useState(0); // 0: Intro, 1: Question, 2: Scenario, 3: Result
+            const [selectedAnswer, setSelectedAnswer] = useState(null);
+            const [isCorrect, setIsCorrect] = useState(null);
+            const [showExplanation, setShowExplanation] = useState(false);
+            const [mistakes, setMistakes] = useState(0);
+
+            const handleAnswer = (index, correctAnswerIndex) => {
+                setSelectedAnswer(index);
+                const correct = index === correctAnswerIndex;
+                setIsCorrect(correct);
+                setShowExplanation(true);
+                if (!correct) setMistakes(m => m + 1);
+            };
+
+            const handleNext = () => {
+                setSelectedAnswer(null);
+                setIsCorrect(null);
+                setShowExplanation(false);
+                if (!isCorrect && mistakes > 0) {
+                    // Si falló, debe reintentar la misma pregunta (lógica simplificada)
+                    // En una app real, la pregunta podría cambiar
+                } else {
+                     setStep(s => s + 1);
+                }
+            };
+
+            const renderIntro = () => (
+                <div className="flex flex-col h-full justify-between">
+                    <div>
+                        <h2 className="text-3xl font-bold font-rounded text-nutrigreen-600 mb-4">{level.title}</h2>
+                        <div className="bg-white p-6 rounded-3xl shadow-sm border-2 border-gray-100 text-lg leading-relaxed text-gray-700">
+                            {level.content}
+                        </div>
+                    </div>
+                    <div className="mt-8">
+                        <NutriMascot mood="happy" message="¡Lee atentamente, lo necesitarás para avanzar!" />
+                        <Button onClick={() => setStep(1)} className="mt-6">Continuar</Button>
+                    </div>
+                </div>
+            );
+
+            const renderQuestion = (qData, isScenario = false) => (
+                <div className="flex flex-col h-full justify-between">
+                     <div>
+                        <div className="flex items-center gap-2 mb-6">
+                            <span className="font-bold text-gray-400 uppercase tracking-wider text-sm">{isScenario ? 'Situación Real' : 'Pregunta'}</span>
+                        </div>
+                        {isScenario && <p className="text-lg font-medium text-gray-600 mb-4 bg-orange-50 p-4 rounded-2xl">{qData.context}</p>}
+                        <h3 className="text-2xl font-bold font-rounded text-nutriblack mb-8">{qData.question || qData.q}</h3>
+                        
+                        <div className="space-y-4">
+                            {qData.options.map((opt, idx) => {
+                                let btnStyle = "bg-white border-gray-200 text-gray-700 hover:bg-gray-50";
+                                if (showExplanation) {
+                                    if (idx === qData.answer) btnStyle = "bg-green-100 border-green-500 text-green-700";
+                                    else if (idx === selectedAnswer) btnStyle = "bg-red-100 border-red-500 text-red-700";
+                                    else btnStyle = "bg-gray-100 border-gray-200 text-gray-400 opacity-50";
+                                } else if (selectedAnswer === idx) {
+                                    btnStyle = "bg-blue-100 border-blue-500 text-blue-700";
+                                }
+
+                                return (
+                                    <button 
+                                        key={idx}
+                                        disabled={showExplanation}
+                                        onClick={() => handleAnswer(idx, qData.answer)}
+                                        className={`w-full p-4 rounded-2xl border-2 font-bold text-left transition-all ${btnStyle}`}
+                                    >
+                                        {opt}
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    </div>
+
+                    {showExplanation && (
+                        <div className={`mt-8 p-6 rounded-3xl ${isCorrect ? 'bg-green-100' : 'bg-red-100'}`}>
+                            <div className="flex items-start gap-4">
+                                <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${isCorrect ? 'bg-green-500' : 'bg-red-500'} text-white`}>
+                                    <Icon name={isCorrect ? 'check' : 'x'} />
+                                </div>
+                                <div>
+                                    <h4 className={`font-bold text-lg ${isCorrect ? 'text-green-800' : 'text-red-800'} mb-1`}>
+                                        {isCorrect ? '¡Excelente!' : 'Casi, piénsalo de nuevo'}
+                                    </h4>
+                                    <p className={isCorrect ? 'text-green-700' : 'text-red-700'}>{qData.explanation}</p>
+                                </div>
+                            </div>
+                            <Button onClick={handleNext} type={isCorrect ? 'primary' : 'danger'} className="mt-6">
+                                {isCorrect ? 'Continuar' : 'Reintentar'}
+                            </Button>
+                        </div>
+                    )}
+                </div>
+            );
+
+            const renderResult = () => {
+                const passed = mistakes === 0; // Regla estricta: sin errores
+                const xpEarned = passed ? 50 : 10;
+                
+                return (
+                    <div className="flex flex-col items-center justify-center h-full text-center py-10">
+                        <NutriMascot mood={passed ? "happy" : "thinking"} size="lg" />
+                        <h2 className="text-3xl font-bold font-rounded text-nutriblack mt-6 mb-2">
+                            {passed ? "¡Nivel Completado!" : "Necesitas repasar"}
+                        </h2>
+                        <p className="text-gray-600 mb-8">
+                            {passed ? "Has demostrado un gran conocimiento nutricional." : "Tuviste algunos errores. En NutriPlay debemos estar seguros antes de avanzar."}
+                        </p>
+                        
+                        <div className="bg-yellow-100 border-2 border-yellow-300 rounded-3xl p-6 w-full max-w-sm mb-8">
+                            <span className="block text-yellow-800 font-bold mb-2">Recompensas</span>
+                            <div className="flex items-center justify-center gap-2 text-2xl font-black text-yellow-600">
+                                <Icon name="star" className="w-8 h-8 fill-current" /> +{xpEarned} XP
+                            </div>
+                        </div>
+
+                        {passed ? (
+                            <Button onClick={() => onComplete(xpEarned, level.id)}>Volver al Mapa</Button>
+                        ) : (
+                            <div className="w-full space-y-4">
+                                <Button onClick={() => { setStep(0); setMistakes(0); }}>Reintentar Nivel</Button>
+                                <Button onClick={onExit} type="secondary">Salir</Button>
+                            </div>
+                        )}
+                    </div>
+                );
+            };
+
+            return (
+                <div className="fixed inset-0 bg-white z-50 flex flex-col">
+                    {/* Header Plegable */}
+                    <div className="flex items-center justify-between p-4 border-b-2 border-gray-100">
+                        <button onClick={onExit} className="p-2 hover:bg-gray-100 rounded-full transition-colors text-gray-500">
+                            <Icon name="x" />
+                        </button>
+                        <div className="flex-1 mx-8 h-4 bg-gray-200 rounded-full overflow-hidden">
+                            <div className="h-full bg-nutrigreen-500 transition-all" style={{width: `${(step/3)*100}%`}}></div>
+                        </div>
+                    </div>
+                    
+                    <div className="flex-1 overflow-y-auto p-6 max-w-2xl w-full mx-auto pb-24">
+                        {step === 0 && renderIntro()}
+                        {step === 1 && renderQuestion(level.questions[0])}
+                        {step === 2 && renderQuestion(level.scenario, true)}
+                        {step === 3 && renderResult()}
+                    </div>
+                </div>
+            );
+        };
+
+        // --- BUSCADOR PREMIUM ---
+        const SearchTool = () => {
+            const [query, setQuery] = useState('');
+            const [selectedFood, setSelectedFood] = useState(null);
+
+            const filteredFoods = useMemo(() => {
+                return foodDatabase.filter(f => f.name.toLowerCase().includes(query.toLowerCase()) || f.category.toLowerCase().includes(query.toLowerCase()));
+            }, [query]);
+
+            return (
+                <div className="p-6 pb-24 max-w-2xl mx-auto">
+                    <h2 className="text-3xl font-bold font-rounded text-nutriblack mb-6">Buscador Nutricional</h2>
+                    
+                    <div className="relative mb-6">
+                        <Icon name="search" className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
+                        <input 
+                            type="text" 
+                            placeholder="Buscar alimento o categoría (ej. Manzana, Proteínas)..." 
+                            className="w-full pl-12 pr-4 py-4 bg-white border-2 border-gray-200 rounded-2xl focus:border-nutrigreen-500 text-lg shadow-sm"
+                            value={query} onChange={e => setQuery(e.target.value)}
+                        />
+                    </div>
+
+                    {!selectedFood ? (
+                        <div className="grid gap-4">
+                            {filteredFoods.map(food => (
+                                <div key={food.id} onClick={() => setSelectedFood(food)} className="bg-white p-4 rounded-2xl shadow-sm border-2 border-gray-100 flex justify-between items-center cursor-pointer hover:border-nutrigreen-300 transition-all btn-bouncy">
+                                    <div>
+                                        <h3 className="font-bold text-lg">{food.name}</h3>
+                                        <span className="text-sm font-medium text-gray-500 bg-gray-100 px-2 py-1 rounded-md">{food.category}</span>
+                                    </div>
+                                    <Icon name="chevronRight" className="text-gray-400" />
+                                </div>
+                            ))}
+                        </div>
+                    ) : (
+                        <div className="bg-white p-6 rounded-3xl shadow-lg border-2 border-nutrigreen-200 animate-fade-in relative">
+                            <button onClick={() => setSelectedFood(null)} className="absolute top-4 right-4 p-2 bg-gray-100 rounded-full text-gray-600 hover:bg-gray-200">
+                                <Icon name="x" className="w-5 h-5" />
+                            </button>
+                            <span className="text-sm font-bold text-nutrigreen-600 uppercase tracking-wider">{selectedFood.category}</span>
+                            <h3 className="text-3xl font-bold font-rounded mb-6">{selectedFood.name}</h3>
+                            
+                            <div className="grid grid-cols-2 gap-4 mb-6">
+                                <div className="bg-blue-50 p-4 rounded-2xl text-center">
+                                    <span className="block text-sm text-blue-600 font-bold mb-1">Proteínas</span>
+                                    <span className="text-2xl font-black text-blue-800">{selectedFood.protein}g</span>
+                                </div>
+                                <div className="bg-orange-50 p-4 rounded-2xl text-center">
+                                    <span className="block text-sm text-orange-600 font-bold mb-1">Carbohidratos</span>
+                                    <span className="text-2xl font-black text-orange-800">{selectedFood.carbs}g</span>
+                                </div>
+                                <div className="bg-yellow-50 p-4 rounded-2xl text-center">
+                                    <span className="block text-sm text-yellow-600 font-bold mb-1">Grasas</span>
+                                    <span className="text-2xl font-black text-yellow-800">{selectedFood.fat}g</span>
+                                </div>
+                                <div className="bg-red-50 p-4 rounded-2xl text-center">
+                                    <span className="block text-sm text-red-600 font-bold mb-1">Calorías (100g)</span>
+                                    <span className="text-2xl font-black text-red-800">{selectedFood.cals}</span>
+                                </div>
+                            </div>
+
+                            <div className="space-y-4 text-gray-700">
+                                <div><strong className="text-nutriblack">Vitaminas:</strong> {selectedFood.vitamins.join(', ')}</div>
+                                <div><strong className="text-nutriblack">Minerales:</strong> {selectedFood.minerals.join(', ')}</div>
+                                <div className="bg-green-50 p-4 rounded-xl border border-green-200">
+                                    <strong className="text-green-800 block mb-1">Beneficios Principales:</strong>
+                                    {selectedFood.benefits}
+                                </div>
+                                <div><strong className="text-nutriblack">Frecuencia Recomendada:</strong> {selectedFood.freq}</div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        // --- DIARIO ALIMENTICIO ---
+        const DiaryTool = ({ user, updateUser }) => {
+            const today = new Date().toISOString().split('T')[0];
+            const [diary, setDiary] = useState(user.diary[today] || { meals: { Desayuno: [], Almuerzo: [], Cena: [], Snacks: [] }, water: 0 });
+            const [activeMeal, setActiveMeal] = useState(null); // Para modal de agregar comida
+            
+            // Calc totales
+            const totals = useMemo(() => {
+                let p=0, c=0, f=0, cal=0;
+                Object.values(diary.meals).flat().forEach(item => {
+                    const food = foodDatabase.find(fd => fd.id === item.id);
+                    if(food) {
+                        const multiplier = item.amount / 100;
+                        p += food.protein * multiplier; c += food.carbs * multiplier; f += food.fat * multiplier; cal += food.cals * multiplier;
+                    }
+                });
+                return { p: p.toFixed(1), c: c.toFixed(1), f: f.toFixed(1), cal: cal.toFixed(0) };
+            }, [diary]);
+
+            const saveDiary = (newDiary) => {
+                setDiary(newDiary);
+                const updatedUser = { ...user, diary: { ...user.diary, [today]: newDiary } };
+                updateUser(updatedUser);
+            };
+
+            const addFoodToMeal = (foodId, amount) => {
+                const newDiary = { ...diary };
+                newDiary.meals[activeMeal].push({ id: foodId, amount: parseInt(amount) });
+                saveDiary(newDiary);
+                setActiveMeal(null);
+            };
+
+            const addWater = () => saveDiary({ ...diary, water: diary.water + 1 });
+
+            return (
+                <div className="p-6 pb-24 max-w-2xl mx-auto space-y-6">
+                    <h2 className="text-3xl font-bold font-rounded text-nutriblack">Tu Diario de Hoy</h2>
+                    
+                    {/* Resumen Diario */}
+                    <div className="bg-nutriblack text-white p-6 rounded-3xl shadow-xl flex justify-between items-center">
+                        <div>
+                            <span className="text-gray-400 text-sm font-bold uppercase tracking-wide">Calorías Totales</span>
+                            <div className="text-4xl font-black font-rounded">{totals.cal} <span className="text-lg text-gray-400 font-normal">kcal</span></div>
+                        </div>
+                        <div className="flex gap-4 text-center">
+                            <div><span className="block text-xs text-blue-400 font-bold mb-1">PRO</span><span className="font-bold">{totals.p}g</span></div>
+                            <div><span className="block text-xs text-orange-400 font-bold mb-1">CAR</span><span className="font-bold">{totals.c}g</span></div>
+                            <div><span className="block text-xs text-yellow-400 font-bold mb-1">GRA</span><span className="font-bold">{totals.f}g</span></div>
+                        </div>
+                    </div>
+
+                    {/* Agua */}
+                    <div className="bg-blue-50 p-6 rounded-3xl border-2 border-blue-100 flex items-center justify-between">
+                        <div>
+                            <h3 className="font-bold text-blue-800 text-lg">Agua (Vasos de 250ml)</h3>
+                            <p className="text-blue-600">{diary.water} / 8 vasos recomendados</p>
+                        </div>
+                        <button onClick={addWater} className="w-12 h-12 bg-blue-500 text-white rounded-full flex items-center justify-center hover:bg-blue-600 btn-bouncy text-2xl font-bold">+</button>
+                    </div>
+
+                    {/* Comidas */}
+                    {['Desayuno', 'Almuerzo', 'Cena', 'Snacks'].map(meal => (
+                        <div key={meal} className="bg-white p-6 rounded-3xl shadow-sm border-2 border-gray-100">
+                            <div className="flex justify-between items-center mb-4">
+                                <h3 className="font-bold font-rounded text-xl text-gray-800">{meal}</h3>
+                                <button onClick={() => setActiveMeal(meal)} className="text-nutrigreen-600 font-bold text-sm bg-nutrigreen-100 px-3 py-1 rounded-lg hover:bg-nutrigreen-200">+ Agregar</button>
+                            </div>
+                            {diary.meals[meal].length === 0 ? (
+                                <p className="text-gray-400 text-sm italic">Aún no has registrado nada aquí.</p>
+                            ) : (
+                                <ul className="space-y-3">
+                                    {diary.meals[meal].map((item, idx) => {
+                                        const food = foodDatabase.find(f => f.id === item.id);
+                                        return (
+                                            <li key={idx} className="flex justify-between items-center text-sm border-b border-gray-50 pb-2">
+                                                <span className="font-medium text-gray-700">{food.name} <span className="text-gray-400 font-normal">({item.amount}g)</span></span>
+                                                <span className="font-bold text-gray-600">{Math.round(food.cals * (item.amount/100))} kcal</span>
+                                            </li>
+                                        );
+                                    })}
+                                </ul>
+                            )}
+                        </div>
+                    ))}
+
+                    {/* Modal simple para agregar (Simulado en línea para 1 archivo) */}
+                    {activeMeal && (
+                        <div className="fixed inset-0 bg-black/50 z-50 flex items-end sm:items-center justify-center p-4">
+                            <div className="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl p-6 max-h-[80vh] flex flex-col">
+                                <div className="flex justify-between items-center mb-4">
+                                    <h3 className="font-bold text-xl">Agregar a {activeMeal}</h3>
+                                    <button onClick={() => setActiveMeal(null)}><Icon name="x" /></button>
+                                </div>
+                                <div className="overflow-y-auto flex-1 space-y-2 no-scrollbar">
+                                    {foodDatabase.map(food => (
+                                        <div key={food.id} className="p-3 border-2 border-gray-100 rounded-xl flex justify-between items-center">
+                                            <span className="font-medium">{food.name}</span>
+                                            <button onClick={() => addFoodToMeal(food.id, 100)} className="bg-nutrigreen-100 text-nutrigreen-700 px-3 py-1 rounded-lg text-sm font-bold hover:bg-nutrigreen-200">Añadir (100g)</button>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        // --- ESTADISTICAS ---
+        const StatsView = ({ user }) => {
+            const [coachMessage, setCoachMessage] = useState('Da clic en el botón para que NutriCoach analice tus hábitos recientes.');
+            const [isLoadingCoach, setIsLoadingCoach] = useState(false);
+
+            const handleAnalyze = async () => {
+                setIsLoadingCoach(true);
+                setCoachMessage('Analizando tu progreso y diario alimenticio...');
+                try {
+                    const today = new Date().toISOString().split('T')[0];
+                    const todayDiary = user.diary[today] || { meals: {}, water: 0 };
+                    const prompt = `Analiza este perfil de estudiante: Nivel ${user.profile.level}, Racha de ${user.profile.streak} días. Registro de agua de hoy: ${todayDiary.water} vasos. Da un consejo motivador y breve de máximo 3 oraciones felicitando al usuario y sugiriendo cómo mejorar basado en estos datos.`;
+                    
+                    const response = await generateText(prompt, "Eres NutriCoach, un entrenador de nutrición motivador, amigable y muy conciso para una aplicación web educativa.");
+                    setCoachMessage(`"${response.trim()}"`);
+                } catch (error) {
+                    setCoachMessage("¡Ups! Hubo un problema al conectar con el entrenador IA. Intenta más tarde.");
+                } finally {
+                    setIsLoadingCoach(false);
+                }
+            };
+
+            // Mock data para el gráfico basado en el nivel del usuario
+            const mockData = [
+                { day: 'Lun', xp: 20 }, { day: 'Mar', xp: 40 }, { day: 'Mié', xp: 10 },
+                { day: 'Jue', xp: 50 }, { day: 'Vie', xp: 30 }, { day: 'Sáb', xp: 80 }, { day: 'Dom', xp: user.profile.xp % 100 }
+            ];
+
+            const maxXP = Math.max(...mockData.map(d => d.xp), 100);
+
+            return (
+                <div className="p-6 pb-24 max-w-2xl mx-auto space-y-6">
+                    <h2 className="text-3xl font-bold font-rounded text-nutriblack">Tus Estadísticas</h2>
+                    
+                    <div className="grid grid-cols-2 gap-4">
+                        <div className="bg-white p-6 rounded-3xl border-2 border-gray-100 text-center">
+                            <span className="text-gray-500 font-bold text-sm uppercase">Nivel Actual</span>
+                            <div className="text-4xl font-black font-rounded text-amber-500 mt-2">{user.profile.level}</div>
+                        </div>
+                        <div className="bg-white p-6 rounded-3xl border-2 border-gray-100 text-center">
+                            <span className="text-gray-500 font-bold text-sm uppercase">Días de Racha</span>
+                            <div className="text-4xl font-black font-rounded text-orange-500 mt-2">{user.profile.streak}</div>
+                        </div>
+                    </div>
+
+                    <div className="bg-white p-6 rounded-3xl border-2 border-gray-100">
+                        <h3 className="font-bold text-gray-700 mb-6">Actividad de esta semana (XP)</h3>
+                        <div className="h-64 w-full flex items-end justify-between pt-8 relative">
+                            {/* Grid lines background */}
+                            <div className="absolute inset-0 flex flex-col justify-between pt-8 pb-6 z-0">
+                                {[0, 1, 2, 3].map(i => (
+                                    <div key={i} className="w-full border-t border-dashed border-gray-200"></div>
+                                ))}
+                            </div>
+                            
+                            {mockData.map((data, index) => {
+                                const heightPercentage = (data.xp / maxXP) * 100;
+                                return (
+                                    <div key={index} className="flex flex-col items-center flex-1 z-10 group">
+                                        <div className="relative w-full px-2 sm:px-4 flex justify-center h-[200px] items-end">
+                                            {/* Tooltip on hover */}
+                                            <div className="absolute -top-10 opacity-0 group-hover:opacity-100 transition-opacity bg-nutriblack text-white text-xs font-bold py-1 px-2 rounded-lg pointer-events-none whitespace-nowrap z-20 shadow-md">
+                                                {data.xp} XP
+                                                <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 w-2 h-2 bg-nutriblack rotate-45"></div>
+                                            </div>
+                                            {/* Bar */}
+                                            <div 
+                                                className="w-full max-w-[40px] bg-nutrigreen-500 rounded-t-lg transition-all duration-500 group-hover:bg-nutrigreen-400"
+                                                style={{ height: `${Math.max(heightPercentage, 5)}%` }} // Minimum height for visibility
+                                            ></div>
+                                        </div>
+                                        <span className="text-xs font-bold text-gray-500 mt-2">{data.day}</span>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </div>
+
+                    <div className="bg-blue-50 p-6 rounded-3xl border-2 border-blue-100 relative">
+                        <h3 className="font-bold font-rounded text-xl text-blue-800 mb-2">NutriCoach Analiza:</h3>
+                        <p className="text-blue-700 italic mb-4">{coachMessage}</p>
+                        <Button onClick={handleAnalyze} disabled={isLoadingCoach} className="mt-2 text-sm bg-blue-600 hover:bg-blue-500 border-blue-800">
+                            {isLoadingCoach ? 'Consultando IA...' : 'Generar análisis ✨'}
+                        </Button>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- NUTRI IA (Simulada) ---
+        const NutriIA = () => {
+            const [messages, setMessages] = useState([
+                { text: "¡Hola! Soy NutriIA, tu asistente especializado en nutrición impulsado por inteligencia artificial. ¿Qué dudas tienes hoy sobre alimentos o hábitos saludables?", sender: 'bot' }
+            ]);
+            const [input, setInput] = useState('');
+            const [isTyping, setIsTyping] = useState(false);
+            const messagesEndRef = useRef(null);
+
+            const scrollToBottom = () => {
+                messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+            };
+
+            useEffect(() => {
+                scrollToBottom();
+            }, [messages, isTyping]);
+
+            const handleSend = async () => {
+                if(!input.trim() || isTyping) return;
+                const userMsg = input.trim();
+                setMessages(prev => [...prev, { text: userMsg, sender: 'user' }]);
+                setInput('');
+                setIsTyping(true);
+
+                try {
+                    const sysInstruction = "Eres Nutri, la mascota y asistente de la plataforma NutriPlay (una manzana verde). Eres experta en nutrición para estudiantes. Responde de forma amable, clara, educativa y concisa (máximo 2 o 3 párrafos cortos). Si la pregunta del usuario no está relacionada con salud, alimentos, biología o nutrición, amablemente indícale que solo puedes responder sobre esos temas y redirige la conversación.";
+                    
+                    const reply = await generateText(userMsg, sysInstruction);
+                    setMessages(prev => [...prev, { text: reply, sender: 'bot' }]);
+                } catch (error) {
+                    setMessages(prev => [...prev, { text: "Lo siento, mi conexión neuronal se interrumpió. Por favor, intenta preguntarme de nuevo.", sender: 'bot' }]);
+                } finally {
+                    setIsTyping(false);
+                }
+            };
+
+            return (
+                <div className="p-6 pb-24 max-w-2xl mx-auto h-[90vh] flex flex-col">
+                    <div className="flex items-center gap-4 mb-6 pb-4 border-b-2 border-gray-100">
+                        <div className="bg-nutrigreen-100 p-3 rounded-full text-nutrigreen-600"><Icon name="bot" /></div>
+                        <div>
+                            <h2 className="text-2xl font-bold font-rounded text-nutriblack">Nutri IA ✨</h2>
+                            <p className="text-sm text-gray-500">Respuestas basadas en ciencia nutricional</p>
+                        </div>
+                    </div>
+                    
+                    <div className="flex-1 overflow-y-auto space-y-4 no-scrollbar mb-4">
+                        {messages.map((m, i) => (
+                            <div key={i} className={`flex ${m.sender === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                <div className={`max-w-[80%] p-4 rounded-2xl ${m.sender === 'user' ? 'bg-nutrigreen-500 text-white rounded-br-sm' : 'bg-white border-2 border-gray-100 text-gray-800 rounded-bl-sm shadow-sm'}`}>
+                                    {m.text}
+                                </div>
+                            </div>
+                        ))}
+                        {isTyping && (
+                            <div className="flex justify-start">
+                                <div className="bg-gray-100 text-gray-500 p-4 rounded-2xl rounded-bl-sm flex items-center gap-2">
+                                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
+                                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '0.2s'}}></div>
+                                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '0.4s'}}></div>
+                                </div>
+                            </div>
+                        )}
+                        <div ref={messagesEndRef} />
+                    </div>
+
+                    <div className="flex gap-2 relative">
+                        <input 
+                            type="text" 
+                            placeholder="Pregúntale a NutriIA..." 
+                            className="flex-1 px-4 py-4 bg-white border-2 border-gray-200 rounded-2xl focus:border-nutrigreen-500 shadow-sm pr-16"
+                            value={input} onChange={e => setInput(e.target.value)}
+                            onKeyPress={e => e.key === 'Enter' && handleSend()}
+                            disabled={isTyping}
+                        />
+                        <button onClick={handleSend} disabled={isTyping} className="absolute right-2 top-2 bottom-2 bg-nutrigreen-500 text-white w-12 rounded-xl flex items-center justify-center hover:bg-nutrigreen-600 transition-colors disabled:bg-gray-300">
+                            <Icon name="chevronRight" />
+                        </button>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- NUTRI SCAN (Simulador de UI) ---
+        const NutriScan = () => {
+            const [scanning, setScanning] = useState(false);
+            const [result, setResult] = useState(null);
+            const [imagePreview, setImagePreview] = useState(null);
+            const fileInputRef = useRef(null);
+
+            const handleImageUpload = async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+
+                // Preview y procesado
+                const reader = new FileReader();
+                reader.onloadend = async () => {
+                    const base64Data = reader.result;
+                    setImagePreview(base64Data);
+                    setScanning(true);
+                    setResult(null);
+
+                    try {
+                        const prompt = "Analiza esta fotografía de comida. Devuelve un JSON estrictamente estructurado con: 'name' (nombre principal del platillo o alimento), 'cals' (calorías totales estimadas en formato numérico), 'nutrients' (una oración sobre los nutrientes más destacados presentes), 'warning' (un breve consejo nutricional, alerta o recomendación sobre este alimento).";
+                        const jsonResult = await analyzeImage(base64Data, prompt);
+                        setResult(jsonResult);
+                    } catch (error) {
+                        setResult({
+                            name: "Error de Análisis",
+                            cals: 0,
+                            nutrients: "No se pudo procesar la imagen.",
+                            warning: "Asegúrate de subir una foto clara de comida y vuelve a intentarlo."
+                        });
+                    } finally {
+                        setScanning(false);
+                    }
+                };
+                reader.readAsDataURL(file);
+            };
+
+            const triggerFileInput = () => {
+                fileInputRef.current?.click();
+            };
+
+            const resetScan = () => {
+                setResult(null);
+                setImagePreview(null);
+                if(fileInputRef.current) fileInputRef.current.value = "";
+            };
+
+            return (
+                <div className="p-6 pb-24 max-w-md mx-auto text-center min-h-[90vh] flex flex-col justify-center">
+                    <h2 className="text-3xl font-bold font-rounded text-nutriblack mb-2">NutriScan ✨</h2>
+                    <p className="text-gray-500 mb-8">Usa visión artificial para analizar tu comida real</p>
+
+                    <input 
+                        type="file" 
+                        accept="image/*" 
+                        capture="environment"
+                        className="hidden" 
+                        ref={fileInputRef} 
+                        onChange={handleImageUpload} 
+                    />
+
+                    {!result ? (
+                        <div className="relative mb-8">
+                            <div className="w-64 h-64 mx-auto bg-gray-200 rounded-3xl border-4 border-dashed border-gray-400 flex items-center justify-center relative overflow-hidden">
+                                {imagePreview ? (
+                                    <img src={imagePreview} alt="Preview" className="w-full h-full object-cover opacity-50" />
+                                ) : (
+                                    <Icon name="camera" className="w-16 h-16 text-gray-400" />
+                                )}
+                                
+                                {scanning && (
+                                    <>
+                                        <div className="absolute inset-0 bg-green-500/20"></div>
+                                        <div className="w-full h-1 bg-green-500 shadow-[0_0_15px_rgba(34,197,94,0.8)] absolute top-0 animate-[scan_2s_ease-in-out_infinite]"></div>
+                                        <div className="absolute inset-0 flex items-center justify-center font-bold text-white drop-shadow-md z-10 text-lg">Analizando IA...</div>
+                                        <style>{`@keyframes scan { 0% { top: 0; } 50% { top: 100%; } 100% { top: 0; } }`}</style>
+                                    </>
+                                )}
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="bg-white p-6 rounded-3xl shadow-lg border-2 border-nutrigreen-200 mb-8 text-left animate-fade-in relative overflow-hidden">
+                            {imagePreview && (
+                                <img src={imagePreview} alt="Comida escaneada" className="w-full h-32 object-cover rounded-xl mb-4 border border-gray-100 shadow-sm" />
+                            )}
+                            <h3 className="text-2xl font-bold mb-4 text-nutriblack">{result.name}</h3>
+                            <div className="space-y-3 text-gray-700">
+                                <div className="flex justify-between border-b border-gray-100 pb-2"><span>Calorías aprox:</span> <strong>{result.cals} kcal</strong></div>
+                                <div className="flex justify-between border-b border-gray-100 pb-2 flex-col"><span className="mb-1 text-gray-500 text-sm">Destaca en:</span> <strong>{result.nutrients}</strong></div>
+                                <div className="bg-green-50 p-3 rounded-xl text-green-800 text-sm font-medium mt-4 border border-green-200 shadow-inner">💡 {result.warning}</div>
+                            </div>
+                            <Button onClick={resetScan} type="secondary" className="mt-6">Escanear otro ✨</Button>
+                        </div>
+                    )}
+
+                    {!result && (
+                        <Button onClick={triggerFileInput} disabled={scanning} className="shadow-lg">
+                            {scanning ? 'Procesando...' : 'Tomar o Subir Foto ✨'}
+                        </Button>
+                    )}
+                </div>
+            );
+        };
+
+        // --- COMPONENTE PRINCIPAL APP ---
+        const App = () => {
+            const [user, setUser] = useState(null);
+            const [currentView, setCurrentView] = useState('login'); // login, register, recover, dashboard, map, level, diary, search, stats, ia, scan
+            const [activeLevel, setActiveLevel] = useState(null);
+
+            // Verificar sesión guardada al iniciar
+            useEffect(() => {
+                const session = localStorage.getItem('nutriSession');
+                if (session) {
+                    const users = JSON.parse(localStorage.getItem('nutriUsers') || '{}');
+                    if (users[session]) {
+                        setUser(users[session]);
+                        setCurrentView('dashboard');
+                    }
+                }
+            }, []);
+
+            const handleLogin = (userData) => {
+                // Actualizar racha si es un nuevo día
+                const today = new Date().toDateString();
+                const lastLog = new Date(userData.profile.lastLogin).toDateString();
+                let newStreak = userData.profile.streak;
+                if (today !== lastLog) {
+                    // Lógica simplificada: si entra, suma 1 (en un app real verificaría si es consecutivo)
+                    newStreak += 1;
+                }
+                
+                const updatedUser = { 
+                    ...userData, 
+                    profile: { ...userData.profile, streak: newStreak, lastLogin: new Date().toISOString() } 
+                };
+                
+                setUser(updatedUser);
+                localStorage.setItem('nutriSession', updatedUser.username);
+                updateUserStorage(updatedUser);
+                setCurrentView('dashboard');
+            };
+
+            const handleLogout = () => {
+                setUser(null);
+                localStorage.removeItem('nutriSession');
+                setCurrentView('login');
+            };
+
+            const updateUserStorage = (updatedUser) => {
+                const users = JSON.parse(localStorage.getItem('nutriUsers') || '{}');
+                users[updatedUser.username] = updatedUser;
+                localStorage.setItem('nutriUsers', JSON.stringify(users));
+                setUser(updatedUser);
+            };
+
+            const handleLevelComplete = (xpGained, levelId) => {
+                const newXp = user.profile.xp + xpGained;
+                const newLevel = Math.floor(newXp / 100) + 1; // 100XP por nivel de usuario
+                const newUnlocked = Math.max(user.profile.highestLevelUnlocked, levelId + 1);
+                
+                const updatedUser = {
+                    ...user,
+                    profile: {
+                        ...user.profile,
+                        xp: newXp,
+                        level: newLevel,
+                        highestLevelUnlocked: newUnlocked
+                    }
+                };
+                updateUserStorage(updatedUser);
+                setCurrentView('map');
+                setActiveLevel(null);
+            };
+
+            // Vistas sin navegación inferior
+            if (['login', 'register', 'recover'].includes(currentView)) {
+                return (
+                    <div>
+                        {currentView === 'login' && <LoginScreen onLogin={handleLogin} onNavigate={setCurrentView} />}
+                        {currentView === 'register' && <RegisterScreen onLogin={handleLogin} onNavigate={setCurrentView} />}
+                        {currentView === 'recover' && <RecoverScreen onNavigate={setCurrentView} />}
+                    </div>
+                );
+            }
+
+            // Vista de nivel ocupando toda la pantalla
+            if (currentView === 'level' && activeLevel) {
+                return <LevelPlay level={activeLevel} user={user} onComplete={handleLevelComplete} onExit={() => setCurrentView('map')} />;
+            }
+
+            // Barra de navegación inferior
+            const BottomNav = () => (
+                <div className="fixed bottom-0 w-full bg-white border-t-2 border-gray-100 px-6 py-3 flex justify-between items-center z-40 pb-safe">
+                    {[
+                        { id: 'dashboard', icon: 'home', label: 'Inicio' },
+                        { id: 'map', icon: 'map', label: 'Aprender' },
+                        { id: 'scan', icon: 'camera', label: 'Scan' },
+                        { id: 'ia', icon: 'bot', label: 'IA' },
+                    ].map(nav => (
+                        <button 
+                            key={nav.id} 
+                            onClick={() => setCurrentView(nav.id)}
+                            className={`flex flex-col items-center gap-1 p-2 ${currentView === nav.id ? 'text-nutrigreen-600' : 'text-gray-400 hover:text-gray-600'}`}
+                        >
+                            <div className={`${currentView === nav.id ? 'bg-nutrigreen-100 p-2 rounded-xl' : 'p-2'}`}>
+                                <Icon name={nav.icon} className={currentView === nav.id ? 'fill-current opacity-20' : ''} />
+                            </div>
+                            <span className="text-[10px] font-bold">{nav.label}</span>
+                        </button>
+                    ))}
+                </div>
+            );
+
+            // Top Bar
+            const TopBar = () => (
+                <div className="sticky top-0 bg-white/80 backdrop-blur-md z-40 border-b border-gray-100 px-6 py-4 flex justify-between items-center">
+                    <div className="flex items-center gap-2 text-nutrigreen-600 font-black font-rounded text-xl tracking-tight">
+                        <Icon name="apple" className="fill-current" /> NutriPlay
+                    </div>
+                    <div className="flex items-center gap-4">
+                         <div className="flex items-center gap-1 font-bold text-orange-500 bg-orange-50 px-2 py-1 rounded-lg">
+                            <Icon name="flame" className="w-4 h-4 fill-current" /> {user.profile.streak}
+                        </div>
+                        <button onClick={handleLogout} className="text-gray-400 hover:text-gray-700">
+                            <Icon name="user" className="w-6 h-6" />
+                        </button>
+                    </div>
+                </div>
+            );
+
+            return (
+                <div className="min-h-screen bg-gray-50 font-sans">
+                    <TopBar />
+                    
+                    <main>
+                        {currentView === 'dashboard' && <Dashboard user={user} changeView={setCurrentView} />}
+                        {currentView === 'map' && <LearningMap user={user} onSelectLevel={(lvl) => { setActiveLevel(lvl); setCurrentView('level'); }} />}
+                        {currentView === 'diary' && <DiaryTool user={user} updateUser={updateUserStorage} />}
+                        {currentView === 'search' && <SearchTool />}
+                        {currentView === 'stats' && <StatsView user={user} />}
+                        {currentView === 'ia' && <NutriIA />}
+                        {currentView === 'scan' && <NutriScan />}
+                    </main>
+
+                    <BottomNav />
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
